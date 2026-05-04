@@ -1,39 +1,82 @@
 # Introduction
 
-Simplegrad is an educational deep learning framework built on top of NumPy. Every part of the stack — from autograd to optimizers — is written in plain Python so that you can read the source, follow the math, and understand how modern deep learning works from the ground up.
+simplegrad is an **educational deep learning framework** built on top of NumPy. Every part of the stack — from the autograd engine to the Adam optimizer — is written in plain Python so that you can read the source, follow the math, and understand how modern deep learning works from the ground up.
+
+If you have ever wondered *"what does PyTorch actually do when I call `.backward()`?"*, simplegrad is the answer in slow motion.
+
+## Installation
+
+```bash
+pip install simplegrad
+```
+
+For local development:
+
+```bash
+git clone https://github.com/simplegrad/simplegrad
+cd simplegrad
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Optional extras:
+
+| Extra      | What it adds |
+|------------|--------------|
+| `dev`      | `pytest`, `black`, `mypy`, `torch` for cross-checks. |
+| `docs`     | `mkdocs`, `mkdocs-material`, `mkdocstrings[python]`. |
+| `cuda12`   | `cupy-cuda12x` so tensors can live on `cuda:N`. |
+| `cuda13`   | `cupy-cuda13x` for CUDA 13. |
+
+## Mental model
+
+1. **Forward.** When you write `y = x @ w`, simplegrad runs the matmul **and** records a graph node remembering its inputs and how to compute the gradient.
+2. **Backward.** When you call `loss.backward()`, the engine walks that graph in reverse, applies the chain rule at each node, and accumulates a gradient on every leaf tensor (`.grad`).
+3. **Update.** An `Optimizer` reads the gradients and writes new values into the parameters in place.
+
+That loop — forward, backward, update — is the entire training algorithm.
 
 ## Architecture
 
-The package is organized in strict layers. Each layer may only import from layers below it:
+The package is organized in **strict layers**. A layer may only import from layers below it:
 
 ```
-core/          Tensor, autograd engine, base classes (Module, Optimizer, Scheduler)
+core/         Tensor, autograd engine, base classes (Module, Optimizer, Scheduler)
   ↑
-functions/     Differentiable math, activations, losses, pooling, conv
+functions/    Differentiable math, activations, losses, pooling, conv
   ↑
-nn/            High-level neural network layers (Linear, Conv2d, Dropout, ...)
+nn/           High-level neural network layers (Linear, Conv2d, Dropout, ...)
   ↑
-optimizers/    SGD, Adam
-schedulers/    LinearLR, ExponentialLR, CosineAnnealingLR, ReduceLROnPlateauLR
+optimizers/   SGD, Adam
+schedulers/   LinearLR, ExponentialLR, CosineAnnealingLR, ReduceLROnPlateauLR
 ```
 
 Supporting modules (`track/`, `visual/`, `simpleboard/`) sit alongside this hierarchy and import from it but are not imported by it.
 
-## Module overview
+| Package | What's in it |
+|---|---|
+| **`core/`** | `Tensor`, the `Function` base class, and `Module`/`Optimizer`/`Scheduler` base classes. |
+| **`functions/`** | Differentiable ops: math, activations, reductions, losses, conv, pooling, transforms. |
+| **`nn/`** | `Module` wrappers around the functional ops: `Linear`, `Conv2d`, `MaxPool2d`, `Dropout`, `Embedding`, `Flatten`, `Sequential`, plus activation and loss layers. |
+| **`optimizers/`** | `SGD` (momentum, dampening) and `Adam` (bias-corrected moments). Both support parameter groups. |
+| **`schedulers/`** | `LinearLR`, `ExponentialLR`, `CosineAnnealingLR`, `ReduceLROnPlateauLR`. |
+| **`track/`** | `Tracker` records scalar metrics and computation graphs to SQLite. |
+| **`visual/`** | `graph()` renders a Tensor's computation graph; `plot()` and `scatter()` draw training curves. |
 
-**`core/`** — The heart of the framework. `autograd.py` contains the `Tensor` class and the `Function` base class that every differentiable operation subclasses. The engine records the forward computation graph and walks it in reverse during `.backward()` to accumulate gradients via the chain rule. `core/` also defines `Module`, `Optimizer`, and `Scheduler` base classes used throughout the rest of the package.
+## First steps
 
-**`functions/`** — A library of differentiable operations: element-wise math (`log`, `exp`, `sin`, `cos`), activations (`relu`, `tanh`, `sigmoid`, `softmax`), reductions (`sum`, `mean`), losses (`ce_loss`, `mse_loss`), 2D convolution, pooling, and shape transforms. Each operation subclasses `Function` and provides `forward` and `backward` static methods.
+```python
+import simplegrad as sg
 
-**`nn/`** — Neural network layers that wrap the functional operations behind a stateful `Module` interface. Includes `Linear`, `Conv2d`, `MaxPool2d`, `Dropout`, `Embedding`, `Flatten`, `Sequential`, activation layers, and loss layers. All layers expose a `.parameters()` dict used by optimizers.
+x = sg.Tensor([1.0, 2.0, 3.0], label="x")     # leaf tensor
+y = sg.mean(x ** 2)                            # builds the graph
+y.backward()                                   # fills x.grad
 
-**`optimizers/`** — Parameter update rules. `SGD` supports momentum and dampening. `Adam` maintains bias-corrected first and second moment estimates. Both accept any `Module` and call `.parameters()` to find what to update.
+print(x.grad)   # array([0.667, 1.333, 2.0])
+```
 
-**`schedulers/`** — Learning rate schedules that wrap an `Optimizer` and call `.set_lr()` on each `.step()`. `LinearLR` interpolates linearly between a start and end rate; `ExponentialLR` decays exponentially by a multiplicative factor. `CosineAnnealingLR` is planned.
-
-**`track/`** — Experiment tracking backed by SQLite. `Tracker` lets you log scalar metrics at each training step, attach computation graphs to runs, and query historical results. Experiments are stored as `.db` files under a configurable directory.
-
-**`visual/`** — Inline visualizations for notebooks. `graph()` renders the computation graph of any tensor as a Graphviz SVG. `plot()` and `scatter()` draw training metric line and scatter charts with matplotlib.
+Operators (`+`, `*`, `@`, `**`) and functional ops (`sg.relu`, `sg.softmax`, `sg.sum`, `sg.mean`, ...) all build graph nodes with known gradients. Calling `.backward()` on a scalar tensor walks the graph in reverse and accumulates `.grad` on every leaf.
 
 ## Full training example
 
@@ -49,25 +92,27 @@ model = sg.nn.Sequential(
 loss_fn = sg.nn.CELoss()
 optimizer = sg.opt.Adam(model, lr=1e-3)
 
-# Toy data
+# Toy data — 8 samples of a 4-dim feature, all in class 0
 x_train = sg.Tensor([[0.1, 0.2, 0.3, 0.4]] * 8, label="x")
 y_train = sg.Tensor([[1, 0, 0]] * 8, label="y")
 
 # Training loop
 for step in range(200):
-    optimizer.zero_grad()
-    logits = model(x_train)
-    loss = loss_fn(logits, y_train)
-    loss.backward()
-    optimizer.step()
+    optimizer.zero_grad()             # clear .grad on every parameter
+    logits = model(x_train)           # forward
+    loss = loss_fn(logits, y_train)   # scalar tensor
+    loss.backward()                   # populate .grad everywhere
+    optimizer.step()                  # update weights in-place
 
     if step % 50 == 0:
         print(f"step {step}  loss {loss.values:.4f}")
 ```
 
+Every concept here — `Tensor`, `Module`, `Sequential`, `CELoss`, `Adam` — is documented in detail in the API reference.
+
 ## Lazy mode
 
-By default simplegrad runs in eager mode: every operation executes immediately and returns a fully realized `Tensor`. Lazy mode defers execution until you call `.realize()`, which lets the engine fuse the whole computation into a single forward pass:
+By default simplegrad runs **eagerly**. Lazy mode lets you build a graph and execute it in one shot:
 
 ```python
 with sg.lazy():
@@ -76,16 +121,11 @@ with sg.lazy():
     c = a + b          # not computed yet — c.values is None
     d = sg.mean(c)     # also deferred
 
-d.realize()            # executes the full graph in one shot
+d.realize()            # executes the full graph
 print(d.values)        # 3.5
 ```
 
-You can also toggle modes globally:
-
-```python
-sg.set_mode("lazy")    # all subsequent ops are lazy
-sg.set_mode("eager")   # back to default
-```
+`backward()` calls `realize()` for you, so you almost never need to invoke it manually.
 
 ## Experiment tracking
 
@@ -103,6 +143,8 @@ for step in range(100):
 tracker.end_run()
 ```
 
+Every metric becomes a row in a SQLite database under `./experiments/`. Plot inline with `simplegrad.visual.plot()` or browse them in the SimpleBoard dashboard.
+
 ## Computation graph visualization
 
 ```python
@@ -112,5 +154,14 @@ x = sg.Tensor([1.0, 2.0], label="x")
 y = sg.Tensor([3.0, 4.0], label="y")
 z = sg.mean(x * y + x)
 
-graph(z)   # renders an SVG in the notebook
+graph(z)   # renders an SVG inline in the notebook
 ```
+
+Salmon = leaf, blue = intermediate, gold = operation. Functions decorated with `@compound_op` (and `Module.forward` methods) are wrapped in a labelled rectangle.
+
+## Where to go next
+
+- Build a model: [`Module`](api/core/module.md), [`Sequential`](api/nn/sequential.md), [`Linear`](api/nn/linear.md).
+- Differentiate it: [`Tensor`](api/core/autograd.md), [`Function`](api/core/function.md).
+- Train it: [`SGD`](api/optimizers/sgd.md), [`Adam`](api/optimizers/adam.md), [Schedulers](api/schedulers/linear.md).
+- Track and visualize: [Tracking](api/track.md), [Visualization](api/visual.md).
